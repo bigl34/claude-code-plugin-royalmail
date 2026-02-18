@@ -24,8 +24,8 @@ const __dirname = dirname(__filename);
 
 // Paths
 const SESSION_PATH = "/tmp/royalmail-session.json";
-const SCREENSHOT_DIR = "/home/USER/biz/.playwright-mcp";
-const LABEL_DIR = "/home/USER/biz/shipping-labels";
+const SCREENSHOT_DIR = "/Users/USER/biz/.playwright-mcp";
+const LABEL_DIR = "/Users/USER/biz/shipping-labels";
 const CONFIG_PATH = join(__dirname, "..", "config.json");
 
 // Royal Mail URLs

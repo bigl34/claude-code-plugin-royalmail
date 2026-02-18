@@ -16,7 +16,7 @@ Create Royal Mail shipping labels via the Click & Drop portal for customer order
 
 Run commands using Bash:
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js <command> [options]
+node /Users/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js <command> [options]
 ```
 
 | Command | Purpose |
@@ -82,7 +82,7 @@ Ask user or infer based on:
 
 Run the create-label command:
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js create-label \
+node /Users/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js create-label \
   --name "John Smith" \
   --address1 "123 High Street" \
   --city "London" \
@@ -124,7 +124,7 @@ The command returns JSON with:
 
 Only after user confirmation:
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js submit
+node /Users/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js submit
 ```
 
 The command returns JSON with:
@@ -136,7 +136,7 @@ The command returns JSON with:
 ### Step 6: Download Label
 
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js download-label
+node /Users/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js download-label
 ```
 
 Returns:
@@ -161,7 +161,7 @@ The label is ready to print.
 
 Always clean up the browser session:
 ```bash
-node /home/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js reset
+node /Users/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scripts/dist/cli.js reset
 ```
 
 ## Error Handling
@@ -221,6 +221,6 @@ For other operations, suggest:
 - **Customer support**: gorgias-support-manager
 
 ## Self-Documentation
-Log API quirks/errors to: `/home/USER/biz/plugin-learnings/royalmail-label-manager.md`
+Log API quirks/errors to: `/Users/USER/biz/plugin-learnings/royalmail-label-manager.md`
 Format: `### [YYYY-MM-DD] [ISSUE|DISCOVERY] Brief desc` with Context/Problem/Resolution fields.
 Full workflow: `~/biz/docs/reference/agent-shared-context.md`

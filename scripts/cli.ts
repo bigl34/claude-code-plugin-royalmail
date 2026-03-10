@@ -29,22 +29,39 @@ const commands = {
       contents: z.string().optional().describe("Package contents description"),
     }),
     async (args, client: RoyalMailClient) => {
+      const typedArgs = args as {
+        name: string;
+        address1: string;
+        city: string;
+        postcode: string;
+        weight: number;
+        service: string;
+        company?: string;
+        address2?: string;
+        email?: string;
+        phone?: string;
+        length?: number;
+        width?: number;
+        height?: number;
+        reference?: string;
+        contents?: string;
+      };
       const labelOptions: CreateLabelOptions = {
-        name: args.name as string,
-        address1: args.address1 as string,
-        city: args.city as string,
-        postcode: args.postcode as string,
-        weight: args.weight as number,
-        service: args.service as string,
-        company: args.company as string | undefined,
-        address2: args.address2 as string | undefined,
-        email: args.email as string | undefined,
-        phone: args.phone as string | undefined,
-        length: args.length as number | undefined,
-        width: args.width as number | undefined,
-        height: args.height as number | undefined,
-        reference: args.reference as string | undefined,
-        contents: args.contents as string | undefined,
+        name: typedArgs.name,
+        address1: typedArgs.address1,
+        city: typedArgs.city,
+        postcode: typedArgs.postcode,
+        weight: typedArgs.weight,
+        service: typedArgs.service,
+        company: typedArgs.company,
+        address2: typedArgs.address2,
+        email: typedArgs.email,
+        phone: typedArgs.phone,
+        length: typedArgs.length,
+        width: typedArgs.width,
+        height: typedArgs.height,
+        reference: typedArgs.reference,
+        contents: typedArgs.contents,
       };
       return client.createLabel(labelOptions);
     },
@@ -61,6 +78,27 @@ const commands = {
     z.object({}),
     async (_args, client: RoyalMailClient) => client.downloadLabel(),
     "Download the generated PDF label"
+  ),
+
+  "download-invoices": createCommand(
+    z.object({
+      outputDir: z.string().min(1).describe("Absolute output directory for downloaded invoice PDFs"),
+      legacyDir: z.string().optional().describe("Optional legacy directory to migrate existing invoices from"),
+      headed: z.boolean().optional().describe("Run browser in headed mode for debugging"),
+    }),
+    async (args, client: RoyalMailClient) => {
+      const typedArgs = args as {
+        outputDir: string;
+        legacyDir?: string;
+        headed?: boolean;
+      };
+      return client.downloadInvoices({
+        outputDir: typedArgs.outputDir,
+        legacyDir: typedArgs.legacyDir,
+        headed: typedArgs.headed,
+      });
+    },
+    "Download new Royal Mail invoices with dedupe and optional legacy migration"
   ),
 
   "list-services": createCommand(

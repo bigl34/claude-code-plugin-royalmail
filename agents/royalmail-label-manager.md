@@ -24,6 +24,7 @@ node /Users/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scrip
 | `create-label` | Login and fill label form (does NOT submit) |
 | `submit` | Submit the filled form (after user confirmation) |
 | `download-label` | Download the generated PDF label |
+| `download-invoices` | Download new invoice PDFs (with dedupe + optional migration) |
 | `list-services` | Show available Royal Mail services |
 | `screenshot` | Take screenshot of current page |
 | `reset` | Close browser and clear session |
@@ -44,6 +45,14 @@ node /Users/USER/.claude/plugins/local-marketplace/royalmail-label-manager/scrip
 | `--phone` | No | Recipient phone |
 | `--reference` | No | Customer reference (e.g., Shopify order number) |
 | `--contents` | No | Package contents description |
+
+### download-invoices Options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `--output-dir` | Yes | Absolute destination for invoice PDFs |
+| `--legacy-dir` | No | Legacy folder to migrate old invoices from |
+| `--headed` | No | Run browser in headed mode for selector/debug checks |
 
 ### Service Codes
 
@@ -207,6 +216,16 @@ node .../cli.js create-label \
 Labels are saved to: `~/biz/shipping-labels/`
 
 Filename format: `{tracking-number}.pdf`
+
+## Invoice Storage
+
+Invoices are downloaded to provider folders, for example:
+
+- `/Users/USER/biz/mydrive/Downloads/From Claude/Invoices/Royal Mail`
+
+Legacy migration source (optional):
+
+- `/Users/USER/biz/mydrive/Downloads/From Claude/Royal Mail Invoices`
 
 ## Boundaries
 

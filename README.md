@@ -3,13 +3,14 @@
 
 Royal Mail Click & Drop shipping labels via browser automation
 
-![Version](https://img.shields.io/badge/version-1.0.4-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.0.6-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
 - **create-label** — Login and fill label form (does NOT submit)
 - **submit** — Submit the filled form (after user confirmation)
 - **download-label** — Download the generated PDF label
+- **download-invoices** — Download new invoice PDFs (with dedupe + optional migration)
 - **list-services** — Show available Royal Mail services
 - **screenshot** — Take screenshot of current page
 - **reset** — Close browser and clear session
@@ -42,18 +43,27 @@ node scripts/dist/cli.js create-label
    cd scripts && npm install
    ```
 
+## Configuration
+
+Copy `config.template.json` to `config.json` and fill in the required values:
+
+| Field | Placeholder |
+|-------|-------------|
+| `credentials_path` | `/path/to/your/credentials` |
+
 ## Available Commands
 
 ### Available CLI Commands
 
-| Command          | Purpose                                          |
-| ---------------- | ------------------------------------------------ |
-| `create-label`   | Login and fill label form (does NOT submit)      |
-| `submit`         | Submit the filled form (after user confirmation) |
-| `download-label` | Download the generated PDF label                 |
-| `list-services`  | Show available Royal Mail services               |
-| `screenshot`     | Take screenshot of current page                  |
-| `reset`          | Close browser and clear session                  |
+| Command             | Purpose                                                      |
+| ------------------- | ------------------------------------------------------------ |
+| `create-label`      | Login and fill label form (does NOT submit)                  |
+| `submit`            | Submit the filled form (after user confirmation)             |
+| `download-label`    | Download the generated PDF label                             |
+| `download-invoices` | Download new invoice PDFs (with dedupe + optional migration) |
+| `list-services`     | Show available Royal Mail services                           |
+| `screenshot`        | Take screenshot of current page                              |
+| `reset`             | Close browser and clear session                              |
 
 ### create-label Options
 
@@ -71,6 +81,14 @@ node scripts/dist/cli.js create-label
 | `--phone`     | No       | Recipient phone                                 |
 | `--reference` | No       | Customer reference (e.g., Shopify order number) |
 | `--contents`  | No       | Package contents description                    |
+
+### download-invoices Options
+
+| Option         | Required | Description                                          |
+| -------------- | -------- | ---------------------------------------------------- |
+| `--output-dir` | Yes      | Absolute destination for invoice PDFs                |
+| `--legacy-dir` | No       | Legacy folder to migrate old invoices from           |
+| `--headed`     | No       | Run browser in headed mode for selector/debug checks |
 
 ## Usage Examples
 

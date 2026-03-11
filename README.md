@@ -24,7 +24,7 @@ Royal Mail Click & Drop shipping labels via browser automation
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/claude-code-plugin-royalmail.git
+git clone https://github.com/bigl34/claude-code-plugin-royalmail.git
 cd claude-code-plugin-royalmail
 cp config.template.json config.json  # fill in your credentials
 cd scripts && npm install

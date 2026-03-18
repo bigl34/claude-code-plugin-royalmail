@@ -29,11 +29,11 @@ const __dirname = dirname(__filename);
 
 // Paths
 const SESSION_PATH = "/tmp/royalmail-session.json";
-const SCREENSHOT_DIR = "/Users/USER/biz/.playwright-mcp";
-const LABEL_DIR = "/Users/USER/biz/shipping-labels";
+const SCREENSHOT_DIR = process.env.HOME + "/biz/.playwright-mcp";
+const LABEL_DIR = process.env.HOME + "/biz/shipping-labels";
 const CONFIG_PATH = join(__dirname, "..", "config.json");
 const DOWNLOAD_LOCK_PATH = "/tmp/download-invoices-royal-mail.lock";
-const INVOICE_ROOT_DIR = "/Users/USER/biz/mydrive/Downloads/From Claude/Invoices";
+const INVOICE_ROOT_DIR = process.env.HOME + "/biz/mydrive/Downloads/From Claude/Invoices";
 const INVOICE_STATE_FILENAME = ".download-invoices-state.json";
 
 // Royal Mail URLs

@@ -1,9 +1,3 @@
-/**
- * Royal Mail Label Manager Client
- *
- * Browser automation client for creating Royal Mail shipping labels
- * and downloading Royal Mail invoices via Click & Drop.
- */
 
 import { chromium, Browser, Page, BrowserContext, Download, Locator } from "playwright";
 import {
@@ -19,33 +13,32 @@ import {
   rmSync,
   openSync,
   closeSync,
+  fstatSync,
+  realpathSync,
+  lstatSync,
 } from "fs";
-import { dirname, join, resolve, isAbsolute, sep, basename } from "path";
-import { execFileSync } from "child_process";
-import { fileURLToPath } from "url";
+import { createHash, randomUUID } from "crypto";
+import { join, resolve, isAbsolute, sep, basename, dirname, extname } from "path";
+import { loadPassCredentials, loadServiceConfig, z } from "@local/cli-utils";
+import { secureStatePath, secureWrite } from "./vendor/secure-state/index.js";
+import { resolveScreenshotPath } from "./screenshot-path.js";
+import { ROYAL_MAIL_SERVICES } from "./royalmail-domain.js";
+import { withFileArbitrationGuard } from "./arbitration-guard.js";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// Paths
-const SESSION_PATH = "/tmp/royalmail-session.json";
+const SESSION_PATH = secureStatePath("royalmail", "session.json");
 const SCREENSHOT_DIR = process.env.HOME + "/biz/.playwright-mcp";
 const LABEL_DIR = process.env.HOME + "/biz/shipping-labels";
-const CONFIG_PATH = join(__dirname, "..", "config.json");
 const DOWNLOAD_LOCK_PATH = "/tmp/download-invoices-royal-mail.lock";
 const INVOICE_ROOT_DIR = process.env.HOME + "/biz/mydrive/Downloads/From Claude/Invoices";
 const INVOICE_STATE_FILENAME = ".download-invoices-state.json";
 
-// Royal Mail URLs
 const ROYALMAIL_LOGIN_URL = "https://business.parcel.royalmail.com/";
 const ROYALMAIL_CREATE_ORDER_URL = "https://business.parcel.royalmail.com/orders/single/create";
 const ROYALMAIL_INVOICES_URL = "https://business.parcel.royalmail.com/payments/invoices/";
 
-const BW_TIMEOUT_MS = 6000;
 const LOCK_STALE_MS = 45 * 60 * 1000;
 const MAX_INVOICE_PAGES = 12;
 
-// Service code mappings
 const SERVICE_CODES: Record<string, string> = {
   TRACKED24: "Royal Mail Tracked 24",
   TRACKED48: "Royal Mail Tracked 48",
@@ -64,12 +57,16 @@ interface SessionInfo {
   headless?: boolean;
 }
 
-interface Config {
-  royalmail?: {
-    username?: string;
-    password?: string;
-  };
-}
+const RoyalMailConfigSchema = z.object({
+  royalmail: z
+    .object({
+      username: z.string().optional(),
+      password: z.string().optional(),
+    })
+    .optional(),
+});
+
+type Config = z.infer<typeof RoyalMailConfigSchema>;
 
 interface RoyalMailCredentials {
   username: string;
@@ -78,6 +75,34 @@ interface RoyalMailCredentials {
 
 interface InvoiceState {
   knownRowKeys: string[];
+}
+
+interface DownloadLockMetadata {
+  pid?: number;
+  createdAt?: string;
+  token?: string;
+}
+
+interface DownloadLockSnapshot {
+  raw: string;
+  metadata: DownloadLockMetadata | null;
+  device: number;
+  inode: number;
+  modifiedAtMs: number;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object" || !("code" in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export interface RoyalMailClientOptions {
+  downloadLockPath?: string;
 }
 
 export interface CreateLabelOptions {
@@ -100,7 +125,6 @@ export interface CreateLabelOptions {
 
 export interface DownloadInvoicesOptions {
   outputDir: string;
-  legacyDir?: string;
   headed?: boolean;
 }
 
@@ -124,8 +148,10 @@ interface FormState {
 interface Result {
   success?: boolean;
   error?: boolean;
+  code?: string;
   message?: string;
   screenshot?: string;
+  requiresManualConfirmation?: boolean;
   formState?: FormState;
   labelPath?: string;
   trackingNumber?: string;
@@ -170,6 +196,11 @@ interface InvoiceRowInfo {
   filenameHint?: string;
 }
 
+interface SavedInvoiceResult {
+  filename: string;
+  downloaded: boolean;
+}
+
 export class RoyalMailClient {
   private config: Config;
   private credentials: RoyalMailCredentials | null = null;
@@ -178,8 +209,11 @@ export class RoyalMailClient {
   private page: Page | null = null;
   private browserHeadless = true;
   private downloadLockFd: number | null = null;
+  private downloadLockToken: string | null = null;
+  private readonly downloadLockPath: string;
 
-  constructor() {
+  constructor(options: RoyalMailClientOptions = {}) {
+    this.downloadLockPath = options.downloadLockPath ?? DOWNLOAD_LOCK_PATH;
     this.config = this.loadConfig();
     if (!existsSync(SCREENSHOT_DIR)) {
       mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -189,9 +223,6 @@ export class RoyalMailClient {
     }
   }
 
-  // ============================================
-  // INTERNAL
-  // ============================================
 
   setHeaded(headed: boolean): void {
     const desiredHeadless = !headed;
@@ -201,27 +232,20 @@ export class RoyalMailClient {
 
     this.browserHeadless = desiredHeadless;
 
-    // Switching headed/headless should not reuse an old incompatible session.
     try {
       if (existsSync(SESSION_PATH)) {
         unlinkSync(SESSION_PATH);
       }
     } catch {
-      // Ignore cleanup errors.
     }
   }
 
   private loadConfig(): Config {
-    if (!existsSync(CONFIG_PATH)) {
-      return {};
-    }
-
-    try {
-      const parsed = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-      return parsed as Config;
-    } catch {
-      throw new Error(`Invalid JSON in config file at ${CONFIG_PATH}`);
-    }
+    const raw = loadServiceConfig("royalmail-label-manager", {
+      schema: RoyalMailConfigSchema,
+      optional: true,
+    });
+    return raw ?? {};
   }
 
   private resolveCredentials(): RoyalMailCredentials {
@@ -237,81 +261,28 @@ export class RoyalMailClient {
       return this.credentials;
     }
 
-    const bitwardenCreds = this.tryResolveBitwardenCredentials(username);
-    if (bitwardenCreds) {
-      this.credentials = bitwardenCreds;
+    const passCreds = this.tryResolvePassCredentials();
+    if (passCreds) {
+      this.credentials = passCreds;
       return this.credentials;
     }
 
     throw new Error(
       "Royal Mail credentials not found. Configure scripts/config.json with royalmail.username/password, " +
-      "or provide an unlocked Bitwarden session via BW_SESSION."
+      "or store them in pass as your-secret-store/royalmail/username and your-secret-store/royalmail/password."
     );
   }
 
-  private tryResolveBitwardenCredentials(preferredUsername?: string): RoyalMailCredentials | null {
-    const bwSession = process.env.BW_SESSION?.trim();
-    if (!bwSession) {
-      return null;
+  private tryResolvePassCredentials(): RoyalMailCredentials | null {
+    const creds = loadPassCredentials({
+      prefix: "your-secret-store/royalmail",
+      keys: ["username", "password"],
+      optional: true,
+    });
+    if (creds.username && creds.password) {
+      return { username: creds.username, password: creds.password };
     }
-
-    const candidates = [
-      "royalmail.com",
-      "business.parcel.royalmail.com",
-      "Royal Mail",
-      "royalmail",
-    ];
-
-    for (const item of candidates) {
-      const rawItem = this.runBw(["get", "item", item, "--session", bwSession]);
-      if (!rawItem) {
-        continue;
-      }
-
-      try {
-        const parsed = JSON.parse(rawItem) as {
-          login?: { username?: string; password?: string };
-        };
-        const username = parsed.login?.username?.trim();
-        const password = parsed.login?.password?.trim();
-        if (username && password) {
-          return { username, password };
-        }
-      } catch {
-        // Ignore parse errors and continue candidate search.
-      }
-    }
-
-    if (preferredUsername) {
-      for (const target of ["royalmail.com", "business.parcel.royalmail.com", "royalmail"]) {
-        const rawPassword = this.runBw(["get", "password", target, "--session", bwSession]);
-        if (rawPassword) {
-          const password = rawPassword.trim();
-          if (password) {
-            return { username: preferredUsername, password };
-          }
-        }
-      }
-    }
-
     return null;
-  }
-
-  private runBw(args: string[]): string | null {
-    try {
-      return execFileSync("bw", args, {
-        encoding: "utf-8",
-        timeout: BW_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-        env: {
-          ...process.env,
-          BW_NOINTERACTION: "true",
-        },
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-    } catch {
-      return null;
-    }
   }
 
   private async ensureBrowser(): Promise<Page> {
@@ -337,7 +308,6 @@ export class RoyalMailClient {
         try {
           unlinkSync(SESSION_PATH);
         } catch {
-          // Ignore deletion errors
         }
       }
     }
@@ -358,7 +328,7 @@ export class RoyalMailClient {
 
     const wsEndpoint = (this.browser as any).wsEndpoint?.() as string | undefined;
     if (wsEndpoint) {
-      writeFileSync(
+      secureWrite(
         SESSION_PATH,
         JSON.stringify({
           wsEndpoint,
@@ -378,7 +348,7 @@ export class RoyalMailClient {
     if (existsSync(SESSION_PATH)) {
       const session = JSON.parse(readFileSync(SESSION_PATH, "utf-8"));
       Object.assign(session, updates);
-      writeFileSync(SESSION_PATH, JSON.stringify(session));
+      secureWrite(SESSION_PATH, JSON.stringify(session));
     }
   }
 
@@ -386,7 +356,6 @@ export class RoyalMailClient {
     const credentials = this.resolveCredentials();
     const page = await this.ensureBrowser();
 
-    // Check if already logged in
     if (existsSync(SESSION_PATH)) {
       const session: SessionInfo = JSON.parse(readFileSync(SESSION_PATH, "utf-8"));
       if (session.loggedIn) {
@@ -396,7 +365,6 @@ export class RoyalMailClient {
             return true;
           }
         } catch {
-          // Continue to login
         }
       }
     }
@@ -523,11 +491,9 @@ export class RoyalMailClient {
           return;
         }
       } catch {
-        // Continue trying other selectors.
       }
     }
 
-    // Last-resort fallback for overlay-only blockers.
     try {
       await page.evaluate(() => {
         const candidates = [
@@ -545,7 +511,6 @@ export class RoyalMailClient {
         }
       });
     } catch {
-      // Ignore non-fatal cookie dismissal failures.
     }
   }
 
@@ -579,12 +544,16 @@ export class RoyalMailClient {
     renameSync(tmpPath, statePath);
   }
 
-  private validateOutputDirPath(outputDir: string): string {
+  private validateOutputDirPath(
+    outputDir: string,
+    invoiceRoot = INVOICE_ROOT_DIR,
+    expectedProviderDir?: string,
+  ): string {
     if (!isAbsolute(outputDir)) {
       throw new Error("--output-dir must be an absolute path.");
     }
 
-    const normalizedRoot = resolve(INVOICE_ROOT_DIR);
+    const normalizedRoot = resolve(invoiceRoot); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
     const normalizedOutput = resolve(outputDir);
 
     if (normalizedOutput !== normalizedRoot && !normalizedOutput.startsWith(`${normalizedRoot}${sep}`)) {
@@ -593,7 +562,64 @@ export class RoyalMailClient {
       );
     }
 
-    return normalizedOutput;
+    if (expectedProviderDir) {
+      const parts = normalizedOutput.startsWith(`${normalizedRoot}${sep}`)
+        ? normalizedOutput.slice(normalizedRoot.length + 1).split(sep)
+        : [];
+      if (parts.length !== 3 || parts[0] !== ".staging" || !parts[1]) {
+        throw new Error(
+          `--output-dir must be a timestamped staging directory: ${normalizedRoot}/.staging/<run>/${expectedProviderDir}`,
+        );
+      }
+      if (parts[2] !== expectedProviderDir) {
+        throw new Error(`--output-dir provider directory must be ${expectedProviderDir}.`);
+      }
+    }
+
+    let existingAncestor = normalizedRoot;
+    const missingRootParts: string[] = [];
+    while (!existsSync(existingAncestor)) {
+      const parent = dirname(existingAncestor);
+      if (parent === existingAncestor) {
+        throw new Error("--output-dir has no existing trusted ancestor.");
+      }
+      missingRootParts.unshift(basename(existingAncestor));
+      existingAncestor = parent;
+    }
+    let realRoot = realpathSync(existingAncestor);
+    for (const part of missingRootParts) {
+      const next = join(realRoot, part); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+      if (existsSync(next)) {
+        const metadata = lstatSync(next);
+        if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+          throw new Error("--output-dir root path contains a non-directory or symbolic link.");
+        }
+      } else {
+        mkdirSync(next, { mode: 0o755 });
+      }
+      realRoot = realpathSync(next);
+    }
+
+    let current = realRoot;
+    const parts = normalizedOutput === normalizedRoot
+      ? []
+      : normalizedOutput.slice(normalizedRoot.length + 1).split(sep);
+    for (const part of parts) {
+      const next = join(current, part); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+      if (existsSync(next)) {
+        const metadata = lstatSync(next);
+        if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+          throw new Error("--output-dir path contains a non-directory or symbolic link.");
+        }
+      } else {
+        mkdirSync(next, { mode: 0o755 });
+      }
+      current = realpathSync(next);
+      if (current !== realRoot && !current.startsWith(`${realRoot}${sep}`)) {
+        throw new Error(`--output-dir resolves outside ${realRoot}. Received: ${current}`);
+      }
+    }
+    return current;
   }
 
   private validateLegacyDirPath(legacyDir: string): string {
@@ -603,85 +629,284 @@ export class RoyalMailClient {
     return resolve(legacyDir);
   }
 
+  private resolveRealPathAllowMissing(targetPath: string): string {
+    let existingAncestor = resolve(targetPath);
+    const missingSegments: string[] = [];
+
+    while (!existsSync(existingAncestor)) {
+      const parent = dirname(existingAncestor);
+      if (parent === existingAncestor) {
+        return resolve(targetPath);
+      }
+      missingSegments.unshift(basename(existingAncestor));
+      existingAncestor = parent;
+    }
+
+    return resolve(realpathSync(existingAncestor), ...missingSegments);
+  }
+
+  private validateInvoiceDirectorySeparation(legacyDir: string, outputDir: string): void {
+    const realLegacyDir = this.resolveRealPathAllowMissing(legacyDir);
+    const realOutputDir = this.resolveRealPathAllowMissing(outputDir);
+    const legacyContainsOutput = realOutputDir.startsWith(`${realLegacyDir}${sep}`);
+    const outputContainsLegacy = realLegacyDir.startsWith(`${realOutputDir}${sep}`);
+
+    if (realLegacyDir === realOutputDir || legacyContainsOutput || outputContainsLegacy) {
+      throw new Error(
+        "--legacy-dir and --output-dir must be distinct, non-overlapping real directories."
+      );
+    }
+  }
+
+  private sha256File(filePath: string): string {
+    return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+  }
+
   private isProcessAlive(pid: number): boolean {
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
-      return false;
+    } catch (error: unknown) {
+      return errorCode(error) !== "ESRCH";
     }
   }
 
-  private readLockMetadata(): { pid?: number; createdAt?: string } | null {
-    if (!existsSync(DOWNLOAD_LOCK_PATH)) {
-      return null;
+  private withDownloadLockArbitration<T>(operation: () => T): T {
+    const activeError = this.activeDownloadLockError();
+    try {
+      return withFileArbitrationGuard({
+        path: `${this.downloadLockPath}.guard`,
+        pid: process.pid,
+        staleMs: LOCK_STALE_MS,
+        now: Date.now,
+        isPidAlive: (pid) => this.isProcessAlive(pid),
+        tokenFactory: randomUUID,
+        activeError: () => activeError,
+      }, operation);
+    } catch (error: unknown) {
+      if (error === activeError) {
+        throw error;
+      }
+      throw new Error(`Failed to arbitrate download lock: ${errorMessage(error)}`);
+    }
+  }
+
+  private readLockSnapshot(): DownloadLockSnapshot | null {
+    let fd: number;
+    try {
+      fd = openSync(this.downloadLockPath, "r");
+    } catch (error: unknown) {
+      if (errorCode(error) === "ENOENT") {
+        return null;
+      }
+      throw error;
     }
 
     try {
-      const raw = readFileSync(DOWNLOAD_LOCK_PATH, "utf-8");
-      const parsed = JSON.parse(raw) as { pid?: number; createdAt?: string };
-      return parsed;
-    } catch {
-      return null;
+      const stat = fstatSync(fd);
+      const raw = readFileSync(fd, "utf-8");
+      let metadata: DownloadLockMetadata | null = null;
+      try {
+        const parsed = JSON.parse(raw) as unknown;
+        if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+          metadata = parsed as DownloadLockMetadata;
+        }
+      } catch {
+      }
+      return {
+        raw,
+        metadata,
+        device: stat.dev,
+        inode: stat.ino,
+        modifiedAtMs: stat.mtimeMs,
+      };
+    } finally {
+      closeSync(fd);
     }
+  }
+
+  private isCompleteLockMetadata(
+    metadata: DownloadLockMetadata | null
+  ): metadata is Required<DownloadLockMetadata> {
+    if (!metadata) return false;
+    const createdAtMs = typeof metadata.createdAt === "string"
+      ? new Date(metadata.createdAt).getTime()
+      : Number.NaN;
+    return typeof metadata.pid === "number"
+      && Number.isSafeInteger(metadata.pid)
+      && metadata.pid > 0
+      && Number.isFinite(createdAtMs)
+      && typeof metadata.token === "string"
+      && metadata.token.length > 0;
+  }
+
+  private isLockSnapshotReclaimable(snapshot: DownloadLockSnapshot): boolean {
+    const pid = snapshot.metadata?.pid;
+    if (Number.isSafeInteger(pid) && (pid as number) > 0) {
+      return !this.isProcessAlive(pid as number);
+    }
+
+    const createdAtMs = typeof snapshot.metadata?.createdAt === "string"
+      ? new Date(snapshot.metadata.createdAt).getTime()
+      : Number.NaN;
+    const ageAnchorMs = Number.isFinite(createdAtMs) ? createdAtMs : snapshot.modifiedAtMs;
+    return Date.now() - ageAnchorMs > LOCK_STALE_MS;
+  }
+
+  private isSameReclaimCandidate(
+    observed: DownloadLockSnapshot,
+    confirmed: DownloadLockSnapshot
+  ): boolean {
+    if (observed.device !== confirmed.device || observed.inode !== confirmed.inode) {
+      return false;
+    }
+
+    const observedToken = observed.metadata?.token;
+    if (typeof observedToken === "string" && observedToken.length > 0) {
+      return confirmed.metadata?.token === observedToken;
+    }
+
+    return observed.raw === confirmed.raw;
+  }
+
+  private tryCreateDownloadLock(token: string): boolean {
+    let fd: number;
+    try {
+      fd = openSync(this.downloadLockPath, "wx");
+    } catch (error: unknown) {
+      if (errorCode(error) === "EEXIST") {
+        return false;
+      }
+      throw new Error(`Failed to create download lock: ${errorMessage(error)}`);
+    }
+
+    try {
+      const payload: Required<DownloadLockMetadata> = {
+        pid: process.pid,
+        createdAt: new Date().toISOString(),
+        token,
+      };
+      writeFileSync(fd, JSON.stringify(payload));
+
+      this.downloadLockFd = fd;
+      this.downloadLockToken = token;
+      return true;
+    } catch (error: unknown) {
+      try {
+        const createdStat = fstatSync(fd);
+        const current = this.readLockSnapshot();
+        if (
+          current
+          && current.device === createdStat.dev
+          && current.inode === createdStat.ino
+        ) {
+          unlinkSync(this.downloadLockPath);
+        }
+      } catch {
+      }
+      try {
+        closeSync(fd);
+      } catch {
+      }
+      throw new Error(`Failed to write download lock: ${errorMessage(error)}`);
+    }
+  }
+
+  private activeDownloadLockError(): Error {
+    return new Error(
+      `Another download-invoices run is already active (lock: ${this.downloadLockPath}).`
+    );
   }
 
   private acquireDownloadLock(): void {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const fd = openSync(DOWNLOAD_LOCK_PATH, "wx");
-        const payload = {
-          pid: process.pid,
-          createdAt: new Date().toISOString(),
-        };
-        writeFileSync(fd, JSON.stringify(payload));
-        this.downloadLockFd = fd;
-        return;
-      } catch (error: any) {
-        if (error?.code !== "EEXIST") {
-          throw new Error(`Failed to create download lock: ${error?.message || String(error)}`);
-        }
-
-        const metadata = this.readLockMetadata();
-        const createdAtMs = metadata?.createdAt ? new Date(metadata.createdAt).getTime() : 0;
-        const tooOld = !createdAtMs || Date.now() - createdAtMs > LOCK_STALE_MS;
-        const processDead = !metadata?.pid || !this.isProcessAlive(metadata.pid);
-
-        if (tooOld || processDead) {
-          try {
-            rmSync(DOWNLOAD_LOCK_PATH, { force: true });
-            continue;
-          } catch {
-            // fall through to lock error below
-          }
-        }
-
-        throw new Error(
-          `Another download-invoices run is already active (lock: ${DOWNLOAD_LOCK_PATH}).`
-        );
-      }
+    if (this.downloadLockFd !== null || this.downloadLockToken !== null) {
+      throw new Error("This client already owns the download-invoices lock.");
     }
 
-    throw new Error(`Could not acquire lock at ${DOWNLOAD_LOCK_PATH}`);
+    this.withDownloadLockArbitration(() => {
+      const token = randomUUID();
+      if (this.tryCreateDownloadLock(token)) {
+        return;
+      }
+
+      const observed = this.readLockSnapshot();
+      if (!observed) {
+        if (!this.tryCreateDownloadLock(token)) {
+          throw this.activeDownloadLockError();
+        }
+        return;
+      }
+      if (!this.isLockSnapshotReclaimable(observed)) {
+        throw this.activeDownloadLockError();
+      }
+
+      const confirmed = this.readLockSnapshot();
+      if (!confirmed) {
+        if (!this.tryCreateDownloadLock(token)) {
+          throw this.activeDownloadLockError();
+        }
+        return;
+      }
+      if (
+        !this.isSameReclaimCandidate(observed, confirmed)
+        || !this.isLockSnapshotReclaimable(confirmed)
+      ) {
+        throw this.activeDownloadLockError();
+      }
+
+      try {
+        unlinkSync(this.downloadLockPath);
+      } catch (error: unknown) {
+        if (errorCode(error) !== "ENOENT") {
+          throw new Error(`Failed to reclaim download lock: ${errorMessage(error)}`);
+        }
+      }
+
+      if (!this.tryCreateDownloadLock(token)) {
+        throw this.activeDownloadLockError();
+      }
+    });
   }
 
   private releaseDownloadLock(): void {
-    try {
-      if (this.downloadLockFd !== null) {
-        closeSync(this.downloadLockFd);
-      }
-    } catch {
-      // Ignore close errors.
-    } finally {
-      this.downloadLockFd = null;
-    }
+    const fd = this.downloadLockFd;
+    const token = this.downloadLockToken;
+    let releaseComplete = false;
 
     try {
-      if (existsSync(DOWNLOAD_LOCK_PATH)) {
-        rmSync(DOWNLOAD_LOCK_PATH, { force: true });
+      if (fd === null || token === null) {
+        releaseComplete = true;
+        return;
       }
+
+      const ownedStat = fstatSync(fd);
+      const current = this.readLockSnapshot();
+      if (!current) {
+        releaseComplete = true;
+        return;
+      }
+
+      const stillOwned = current.device === ownedStat.dev
+        && current.inode === ownedStat.ino
+        && this.isCompleteLockMetadata(current.metadata)
+        && current.metadata.token === token;
+      if (stillOwned) {
+        unlinkSync(this.downloadLockPath);
+      }
+      releaseComplete = true;
     } catch {
-      // Ignore unlock errors.
+    } finally {
+      if (!releaseComplete) {
+        return;
+      }
+      try {
+        if (fd !== null) {
+          closeSync(fd);
+        }
+      } catch {
+      }
+      this.downloadLockFd = null;
+      this.downloadLockToken = null;
     }
   }
 
@@ -697,6 +922,30 @@ export class RoyalMailClient {
     }
 
     let entries: string[] = [];
+    let quarantineDir: string | null = null;
+    const quarantineSource = (sourcePath: string, entry: string): void => {
+      if (!quarantineDir) {
+        const quarantineRoot = join(legacyDir, ".migrated-quarantine"); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+        if (existsSync(quarantineRoot)) {
+          const rootStat = lstatSync(quarantineRoot);
+          if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+            throw new Error("legacy quarantine root is not a real directory");
+          }
+        } else {
+          mkdirSync(quarantineRoot, { mode: 0o700 });
+        }
+        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+        const quarantineStem = `${timestamp}-${process.pid}`;
+        quarantineDir = join(quarantineRoot, quarantineStem); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+        let suffix = 0;
+        while (existsSync(quarantineDir)) {
+          suffix += 1;
+          quarantineDir = join(quarantineRoot, `${quarantineStem}-${suffix}`); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+        }
+        mkdirSync(quarantineDir, { mode: 0o700 });
+      }
+      renameSync(sourcePath, join(quarantineDir, entry)); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+    };
     try {
       entries = readdirSync(legacyDir);
     } catch (error: any) {
@@ -714,34 +963,70 @@ export class RoyalMailClient {
       const tempPath = `${destinationPath}.migrating-${process.pid}-${Date.now()}`;
 
       try {
-        const sourceStat = statSync(sourcePath);
-        if (!sourceStat.isFile()) {
+        const sourceStat = lstatSync(sourcePath);
+        if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
           continue;
         }
+        if (sourceStat.size <= 0) {
+          throw new Error("legacy source is empty");
+        }
+
+        const sourceHash = this.sha256File(sourcePath);
 
         if (existsSync(destinationPath)) {
-          const destinationStat = statSync(destinationPath);
-          if (destinationStat.size > 0) {
-            migration.skippedExisting += 1;
-            if (destinationStat.size === sourceStat.size) {
-              unlinkSync(sourcePath);
+          const destinationStat = lstatSync(destinationPath);
+          if (destinationStat.isSymbolicLink()) {
+            throw new Error("destination is a symbolic link");
+          }
+          if (destinationStat.isFile() && destinationStat.size > 0) {
+            if (this.sha256File(destinationPath) !== sourceHash) {
+              throw new Error("destination exists with different SHA-256 content");
             }
+
+            migration.skippedExisting += 1;
+            quarantineSource(sourcePath, entry);
             continue;
           }
-
-          // Remove zero-byte destination so migration can repair it.
-          rmSync(destinationPath, { force: true });
         }
 
         copyFileSync(sourcePath, tempPath);
 
         const tempStat = statSync(tempPath);
-        if (tempStat.size <= 0 || tempStat.size !== sourceStat.size) {
-          throw new Error("migrated file size mismatch");
+        if (!tempStat.isFile() || tempStat.size <= 0 || this.sha256File(tempPath) !== sourceHash) {
+          throw new Error("migrated file SHA-256 mismatch");
+        }
+
+        if (existsSync(destinationPath)) {
+          const destinationStat = lstatSync(destinationPath);
+          if (destinationStat.isSymbolicLink()) {
+            throw new Error("destination became a symbolic link during migration");
+          }
+          if (destinationStat.isFile() && destinationStat.size > 0) {
+            if (this.sha256File(destinationPath) !== sourceHash) {
+              throw new Error("destination changed during migration");
+            }
+
+            rmSync(tempPath, { force: true });
+            migration.skippedExisting += 1;
+            quarantineSource(sourcePath, entry);
+            continue;
+          }
+
+          rmSync(destinationPath, { force: true });
         }
 
         renameSync(tempPath, destinationPath);
-        unlinkSync(sourcePath);
+
+        const destinationStat = lstatSync(destinationPath);
+        if (
+          !destinationStat.isFile() ||
+          destinationStat.size <= 0 ||
+          this.sha256File(destinationPath) !== sourceHash
+        ) {
+          throw new Error("saved destination SHA-256 mismatch");
+        }
+
+        quarantineSource(sourcePath, entry);
         migration.moved += 1;
       } catch (error: any) {
         migration.errors.push(`Migration failed for ${entry}: ${error.message}`);
@@ -750,7 +1035,6 @@ export class RoyalMailClient {
             rmSync(tempPath, { force: true });
           }
         } catch {
-          // Ignore cleanup errors.
         }
       }
     }
@@ -765,6 +1049,149 @@ export class RoyalMailClient {
       return cleaned;
     }
     return `${cleaned}.pdf`;
+  }
+
+  private buildRowIdentity(info: InvoiceRowInfo): string {
+    return createHash("sha256")
+      .update(info.rowKey || info.rowText)
+      .digest("hex")
+      .slice(0, 12);
+  }
+
+  private appendRowIdentity(filename: string, info: InvoiceRowInfo): string {
+    const extension = extname(filename) || ".pdf";
+    const stem = filename.slice(0, filename.length - extension.length);
+    return `${stem}-${this.buildRowIdentity(info)}${extension}`;
+  }
+
+  private invoiceFilePath(outputDir: string, filename: string): string {
+    return join(outputDir, basename(filename));
+  }
+
+  private resolveDedupeKey(info: InvoiceRowInfo): string {
+    if (info.rowKey) {
+      return info.rowKey;
+    }
+    return `rowtext:${this.buildRowIdentity(info)}`;
+  }
+
+  private claimExistingInvoiceFile(
+    outputDir: string,
+    knownRowKeys: Set<string>,
+    claimedExistingFiles: Set<string>,
+    preRunFiles: Set<string>,
+    info: InvoiceRowInfo
+  ): boolean {
+    const fallbackFilename = `invoice-${this.buildRowIdentity(info)}.pdf`;
+    const candidates: string[] = [];
+    if (info.filenameHint) {
+      const preferred = this.sanitizePdfFilename(info.filenameHint);
+      candidates.push(preferred, this.appendRowIdentity(preferred, info));
+    }
+    candidates.push(fallbackFilename);
+
+    let filename: string | undefined;
+    for (const candidate of candidates) {
+      if (claimedExistingFiles.has(candidate) || !preRunFiles.has(candidate)) continue;
+      if (!this.isNonEmptyFile(this.invoiceFilePath(outputDir, candidate))) continue;
+      filename = candidate;
+      break;
+    }
+    if (!filename) return false;
+
+    claimedExistingFiles.add(filename);
+    this.persistSavedRowKey(outputDir, knownRowKeys, info, filename);
+    return true;
+  }
+
+  private resolveInvoiceFilename(
+    info: InvoiceRowInfo,
+    suggestedFilename: string,
+    existingFiles: Set<string>
+  ): string {
+    const fallbackFilename = `invoice-${this.buildRowIdentity(info)}.pdf`;
+    const preferredFilename = info.filenameHint
+      ? this.sanitizePdfFilename(info.filenameHint)
+      : fallbackFilename;
+
+    if (!existingFiles.has(preferredFilename)) {
+      return preferredFilename;
+    }
+
+    return this.appendRowIdentity(preferredFilename, info);
+  }
+
+  private isNonEmptyFile(filePath: string): boolean {
+    if (!existsSync(filePath)) {
+      return false;
+    }
+
+    const fileStat = lstatSync(filePath);
+    return fileStat.isFile() && fileStat.size > 0;
+  }
+
+  private async saveInvoiceDownload(
+    download: Pick<Download, "suggestedFilename" | "saveAs">,
+    info: InvoiceRowInfo,
+    outputDir: string,
+    existingFiles: Set<string>
+  ): Promise<SavedInvoiceResult> {
+    const filename = this.resolveInvoiceFilename(
+      info,
+      download.suggestedFilename(),
+      existingFiles
+    );
+    const finalPath = join(outputDir, filename);
+    const tempPath = `${finalPath}.part-${process.pid}-${Date.now()}`;
+
+    if (this.isNonEmptyFile(finalPath)) {
+      return { filename, downloaded: false };
+    }
+
+    try {
+      await download.saveAs(tempPath);
+
+      if (!this.isNonEmptyFile(tempPath)) {
+        throw new Error("downloaded file is empty");
+      }
+
+      if (this.isNonEmptyFile(finalPath)) {
+        rmSync(tempPath, { force: true });
+        existingFiles.add(filename);
+        return { filename, downloaded: false };
+      }
+
+      if (existsSync(finalPath)) {
+        rmSync(finalPath, { force: true });
+      }
+
+      renameSync(tempPath, finalPath);
+      if (!this.isNonEmptyFile(finalPath)) {
+        throw new Error("saved invoice is empty");
+      }
+
+      existingFiles.add(filename);
+      return { filename, downloaded: true };
+    } catch (error) {
+      if (existsSync(tempPath)) {
+        rmSync(tempPath, { force: true });
+      }
+      throw error;
+    }
+  }
+
+  private persistSavedRowKey(
+    outputDir: string,
+    knownRowKeys: Set<string>,
+    info: InvoiceRowInfo,
+    filename: string
+  ): void {
+    if (!this.isNonEmptyFile(this.invoiceFilePath(outputDir, filename))) {
+      throw new Error(`Refusing to persist row key before ${filename} is proven saved.`);
+    }
+
+    knownRowKeys.add(this.resolveDedupeKey(info));
+    this.saveInvoiceState(outputDir, knownRowKeys);
   }
 
   private normalizeAmountToken(text: string): string | undefined {
@@ -988,16 +1415,13 @@ export class RoyalMailClient {
   private collectExistingInvoiceFiles(outputDir: string): Set<string> {
     const existingFiles = new Set<string>();
     for (const entry of readdirSync(outputDir)) {
-      if (entry.toLowerCase().endsWith(".pdf")) {
+      if (entry.toLowerCase().endsWith(".pdf") && this.isNonEmptyFile(join(outputDir, entry))) {
         existingFiles.add(entry);
       }
     }
     return existingFiles;
   }
 
-  // ============================================
-  // LABEL OPERATIONS
-  // ============================================
 
   async createLabel(options: CreateLabelOptions): Promise<Result> {
     const page = await this.ensureBrowser();
@@ -1076,7 +1500,8 @@ export class RoyalMailClient {
         success: true,
         screenshot: previewScreenshot,
         formState,
-        message: "Form filled successfully. Please review the screenshot before calling submit.",
+        message:
+          "Form preview created. Review the screenshot, then recreate and complete the purchase manually in the Royal Mail portal. The CLI cannot safely continue this browser session in another command.",
       };
     } catch (error: any) {
       const errorScreenshot = `${SCREENSHOT_DIR}/royalmail-form-error-${Date.now()}.png`;
@@ -1181,7 +1606,6 @@ export class RoyalMailClient {
         return;
       }
     } catch {
-      // continue
     }
 
     try {
@@ -1191,7 +1615,6 @@ export class RoyalMailClient {
         return;
       }
     } catch {
-      // continue
     }
 
     try {
@@ -1200,147 +1623,19 @@ export class RoyalMailClient {
         await label.click();
       }
     } catch {
-      // continue
     }
   }
 
   async submit(): Promise<Result> {
-    const page = await this.ensureBrowser();
-
-    if (existsSync(SESSION_PATH)) {
-      const session: SessionInfo = JSON.parse(readFileSync(SESSION_PATH, "utf-8"));
-      if (!session.formFilled) {
-        return {
-          error: true,
-          message: "Form has not been filled yet. Call create-label first.",
-        };
-      }
-    }
-
-    try {
-      const submitButtonSelectors = [
-        'button:has-text("Buy postage")',
-        'button:has-text("Apply postage")',
-        'button:has-text("Create label")',
-        'button:has-text("Continue")',
-        'button:has-text("Next")',
-        'button:has-text("Submit")',
-        'button[type="submit"]',
-        '[data-testid="submit-button"]',
-        '[data-testid="create-label-button"]',
-      ];
-
-      for (const selector of submitButtonSelectors) {
-        try {
-          const button = await page.$(selector);
-          if (button) {
-            await button.click();
-            break;
-          }
-        } catch {
-          continue;
-        }
-      }
-
-      await page.waitForLoadState("networkidle");
-      await page.waitForTimeout(3000);
-
-      const reviewScreenshot = `${SCREENSHOT_DIR}/royalmail-review-${Date.now()}.png`;
-      await page.screenshot({ path: reviewScreenshot, fullPage: true });
-
-      const confirmButtons = [
-        'button:has-text("Confirm")',
-        'button:has-text("Pay")',
-        'button:has-text("Complete")',
-        'button:has-text("Finish")',
-      ];
-
-      for (const selector of confirmButtons) {
-        try {
-          const button = await page.$(selector);
-          if (button) {
-            await button.click();
-            await page.waitForLoadState("networkidle");
-            await page.waitForTimeout(3000);
-            break;
-          }
-        } catch {
-          continue;
-        }
-      }
-
-      const confirmationScreenshot = `${SCREENSHOT_DIR}/royalmail-confirmation-${Date.now()}.png`;
-      await page.screenshot({ path: confirmationScreenshot, fullPage: true });
-
-      const extractedData = await this.extractConfirmation(page);
-
-      this.updateSession({ labelGenerated: true });
-
-      return {
-        success: true,
-        screenshot: confirmationScreenshot,
-        trackingNumber: extractedData.trackingNumber,
-        cost: extractedData.cost,
-        message: "Label created successfully. Call download-label to save the PDF.",
-      };
-    } catch (error: any) {
-      const errorScreenshot = `${SCREENSHOT_DIR}/royalmail-submit-error-${Date.now()}.png`;
-      await page.screenshot({ path: errorScreenshot, fullPage: true });
-      return {
-        error: true,
-        message: `Submit failed: ${error.message}`,
-        screenshot: errorScreenshot,
-      };
-    }
+    return {
+      error: true,
+      code: "manual-finalization-required",
+      requiresManualConfirmation: true,
+      message:
+        "Automated Royal Mail submission is disabled because the CLI cannot reconnect to the exact filled form safely. Recreate and complete the purchase manually in the Royal Mail portal.",
+    };
   }
 
-  private async extractConfirmation(page: Page): Promise<{ trackingNumber?: string; cost?: string }> {
-    try {
-      return await page.evaluate(() => {
-        const text = document.body.innerText;
-
-        const trackingPatterns = [
-          /Tracking[:\s#]*([A-Z]{2}\d{9}GB)/i,
-          /Reference[:\s#]*([A-Z]{2}\d{9}GB)/i,
-          /([A-Z]{2}\d{9}GB)/,
-          /Barcode[:\s#]*(\d+)/i,
-        ];
-
-        let trackingNumber: string | undefined = undefined;
-        for (const pattern of trackingPatterns) {
-          const match = text.match(pattern);
-          if (match) {
-            trackingNumber = match[1];
-            break;
-          }
-        }
-
-        const costPatterns = [
-          /Total[:\s]*[£\$]?([\d.,]+)/i,
-          /Cost[:\s]*[£\$]?([\d.,]+)/i,
-          /Price[:\s]*[£\$]?([\d.,]+)/i,
-          /[£]([\d.,]+)/,
-        ];
-
-        let cost: string | undefined = undefined;
-        for (const pattern of costPatterns) {
-          const match = text.match(pattern);
-          if (match) {
-            cost = `£${match[1]}`;
-            break;
-          }
-        }
-
-        return { trackingNumber, cost };
-      });
-    } catch {
-      return {};
-    }
-  }
-
-  // ============================================
-  // DOWNLOAD OPERATIONS
-  // ============================================
 
   async downloadLabel(): Promise<Result> {
     const page = await this.ensureBrowser();
@@ -1409,10 +1704,15 @@ export class RoyalMailClient {
   }
 
   async downloadInvoices(options: DownloadInvoicesOptions): Promise<DownloadInvoicesResult> {
+    const legacyDir = (options as DownloadInvoicesOptions & { legacyDir?: string }).legacyDir;
+    if (legacyDir) {
+      throw new Error(
+        "Royal Mail --legacy-dir migration is retired; bind legacy files through invoice-providers prepare-promotion and exact promote-staging instead."
+      );
+    }
     this.setHeaded(options.headed === true);
 
-    const outputDir = this.validateOutputDirPath(options.outputDir);
-    const legacyDir = options.legacyDir ? this.validateLegacyDirPath(options.legacyDir) : undefined;
+    const outputDir = this.validateOutputDirPath(options.outputDir, INVOICE_ROOT_DIR, "Royal Mail");
 
     this.acquireDownloadLock();
 
@@ -1421,15 +1721,13 @@ export class RoyalMailClient {
     const skipped: string[] = [];
     const errors: string[] = [];
     const warnings: string[] = [];
+    const migration: MigrationResult = { moved: 0, skippedExisting: 0, errors: [] };
 
     try {
-      if (!existsSync(outputDir)) {
-        mkdirSync(outputDir, { recursive: true });
-      }
-
-      const migration = this.migrateLegacyInvoices(legacyDir, outputDir);
       const knownRowKeys = this.loadInvoiceState(outputDir);
       const existingFiles = this.collectExistingInvoiceFiles(outputDir);
+      const preRunFiles = new Set(existingFiles);
+      const claimedExistingFiles = new Set<string>();
 
       if (migration.errors.length > 0) {
         warnings.push(...migration.errors.map((e) => `Migration warning: ${e}`));
@@ -1466,10 +1764,18 @@ export class RoyalMailClient {
           totalSeen += 1;
 
           const rowLabel = this.describeInvoiceRow(info);
-          const knownByRowKey = info.rowKey ? knownRowKeys.has(info.rowKey) : false;
-          const knownByFilename = info.filenameHint ? existingFiles.has(info.filenameHint) : false;
+          const knownByRowKey = knownRowKeys.has(this.resolveDedupeKey(info));
+          const adoptedExistingFile = knownByRowKey
+            ? false
+            : this.claimExistingInvoiceFile(
+                outputDir,
+                knownRowKeys,
+                claimedExistingFiles,
+                preRunFiles,
+                info
+              );
 
-          if (knownByRowKey || knownByFilename) {
+          if (knownByRowKey || adoptedExistingFile) {
             skipped.push(rowLabel);
             continue;
           }
@@ -1487,52 +1793,25 @@ export class RoyalMailClient {
             const downloadPromise = page.waitForEvent("download", { timeout: 45000 });
             await control.click({ timeout: 10000 });
             const download = await downloadPromise;
-
-            const suggestedFilename = this.sanitizePdfFilename(
-              download.suggestedFilename() || info.filenameHint || `invoice-${Date.now()}-${index + 1}.pdf`
+            const savedInvoice = await this.saveInvoiceDownload(
+              download,
+              info,
+              outputDir,
+              existingFiles
             );
 
-            const finalPath = join(outputDir, suggestedFilename);
-            const tempPath = `${finalPath}.part-${process.pid}-${Date.now()}`;
+            this.persistSavedRowKey(
+              outputDir,
+              knownRowKeys,
+              info,
+              savedInvoice.filename
+            );
+            claimedExistingFiles.add(savedInvoice.filename);
 
-            if (existsSync(finalPath) && statSync(finalPath).size > 0) {
-              skipped.push(suggestedFilename);
-              if (info.rowKey) {
-                knownRowKeys.add(info.rowKey);
-              }
-              continue;
-            }
-
-            await download.saveAs(tempPath);
-
-            const tempStat = statSync(tempPath);
-            if (tempStat.size <= 0) {
-              rmSync(tempPath, { force: true });
-              pageHadErrors = true;
-              errors.push(`Downloaded zero-byte invoice for ${rowLabel}`);
-              continue;
-            }
-
-            if (existsSync(finalPath)) {
-              const currentStat = statSync(finalPath);
-              if (currentStat.size > 0) {
-                rmSync(tempPath, { force: true });
-                skipped.push(suggestedFilename);
-                if (info.rowKey) {
-                  knownRowKeys.add(info.rowKey);
-                }
-                continue;
-              }
-
-              rmSync(finalPath, { force: true });
-            }
-
-            renameSync(tempPath, finalPath);
-            existingFiles.add(suggestedFilename);
-            downloaded.push(suggestedFilename);
-
-            if (info.rowKey) {
-              knownRowKeys.add(info.rowKey);
+            if (savedInvoice.downloaded) {
+              downloaded.push(savedInvoice.filename);
+            } else {
+              skipped.push(savedInvoice.filename);
             }
           } catch (error: any) {
             pageHadErrors = true;
@@ -1575,30 +1854,21 @@ export class RoyalMailClient {
     }
   }
 
-  // ============================================
-  // SERVICE INFORMATION
-  // ============================================
 
   async listServices(): Promise<ServiceInfo[]> {
-    return [
-      { code: "TRACKED24", name: "Royal Mail Tracked 24", description: "Next working day delivery with tracking" },
-      { code: "TRACKED48", name: "Royal Mail Tracked 48", description: "2-3 working day delivery with tracking" },
-      { code: "SPECIALDELIVERY9", name: "Special Delivery Guaranteed by 9am", description: "Next day by 9am, compensation up to £2,500" },
-      { code: "SPECIALDELIVERY1", name: "Special Delivery Guaranteed by 1pm", description: "Next day by 1pm, compensation up to £500" },
-      { code: "SIGNED", name: "Royal Mail Signed For 1st Class", description: "1st class with signature on delivery" },
-      { code: "SIGNED2", name: "Royal Mail Signed For 2nd Class", description: "2nd class with signature on delivery" },
-    ];
+    return ROYAL_MAIL_SERVICES.map((service) => ({
+      code: service.key,
+      name: service.displayName,
+      description: `${service.trackingKind === "none" ? "Untracked" : service.trackingKind === "full" ? "Tracked" : "Delivery confirmation"}; ${service.vatTreatment === "standard20" ? "20% VAT" : "VAT exempt"}`,
+    }));
   }
 
-  // ============================================
-  // SCREENSHOT OPERATIONS
-  // ============================================
 
   async takeScreenshot(options?: ScreenshotOptions): Promise<Result> {
     const page = await this.ensureBrowser();
 
     const filename = options?.filename || `royalmail-${Date.now()}.png`;
-    const screenshotPath = `${SCREENSHOT_DIR}/${filename}`;
+    const screenshotPath = resolveScreenshotPath(filename, SCREENSHOT_DIR);
 
     await page.screenshot({
       path: screenshotPath,
@@ -1611,9 +1881,6 @@ export class RoyalMailClient {
     };
   }
 
-  // ============================================
-  // SESSION MANAGEMENT
-  // ============================================
 
   async reset(): Promise<Result> {
     try {

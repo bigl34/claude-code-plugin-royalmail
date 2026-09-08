@@ -1,5 +1,6 @@
 {
   "name": "royalmail-label-manager",
-  "version": "1.1.0",
-  "description": "Royal Mail Click & Drop shipping labels via browser automation"
+  "version": "1.3.0",
+  "description": "Royal Mail Click & Drop shipping labels via browser automation",
+  "repository": "https://github.com/bigl34/claude-code-plugin-royalmail"
 }

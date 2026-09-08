@@ -3,17 +3,20 @@
 
 Royal Mail Click & Drop shipping labels via browser automation
 
-![Version](https://img.shields.io/badge/version-1.1.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
+![Version](https://img.shields.io/badge/version-1.3.0-blue) ![License: MIT](https://img.shields.io/badge/License-MIT-green) ![Node >= 18](https://img.shields.io/badge/node-%3E%3D18-brightgreen)
 
 ## Features
 
-- **create-label** — Login and fill label form (does NOT submit)
-- **submit** — Submit the filled form (after user confirmation)
-- **download-label** — Download the generated PDF label
-- **download-invoices** — Download new invoice PDFs (with dedupe + optional migration)
-- **list-services** — Show available Royal Mail services
-- **screenshot** — Take screenshot of current page
-- **reset** — Close browser and clear session
+- CLI
+- **purchase-label --request-file <private.json> --confirm** — Adopt/import or create one Click & Drop order, buy postage, download and validate its label
+- **reconcile-purchase --run-id <id>** — Recover an already-paid uncertain run; never enters checkout or makes payment
+- **list-services** — Return the supported service catalogue in operational order
+- **download-invoices** — Download new invoice PDFs with dedupe
+- **create-label** — Legacy browser preview only; does not submit
+- **submit** — Compatibility refusal; does not submit
+- **download-label** — Legacy session download
+- **screenshot** — Diagnostic screenshot
+- **reset** — Clear the legacy browser session
 
 ## Prerequisites
 
@@ -27,11 +30,11 @@ Royal Mail Click & Drop shipping labels via browser automation
 git clone https://github.com/bigl34/claude-code-plugin-royalmail.git
 cd claude-code-plugin-royalmail
 cp config.template.json config.json  # fill in your credentials
-cd scripts && npm install
+npm --prefix scripts install
 ```
 
 ```bash
-node scripts/dist/cli.js create-label
+npm --prefix scripts run cli -- purchase-label --request-file <private.json> --confirm
 ```
 
 ## Installation
@@ -45,55 +48,17 @@ node scripts/dist/cli.js create-label
 
 ## Available Commands
 
-### Available CLI Commands
-
-| Command             | Purpose                                                      |
-| ------------------- | ------------------------------------------------------------ |
-| `create-label`      | Login and fill label form (does NOT submit)                  |
-| `submit`            | Submit the filled form (after user confirmation)             |
-| `download-label`    | Download the generated PDF label                             |
-| `download-invoices` | Download new invoice PDFs (with dedupe + optional migration) |
-| `list-services`     | Show available Royal Mail services                           |
-| `screenshot`        | Take screenshot of current page                              |
-| `reset`             | Close browser and clear session                              |
-
-### create-label Options
-
-| Option        | Required | Description                                     |
-| ------------- | -------- | ----------------------------------------------- |
-| `--name`      | Yes      | Recipient full name                             |
-| `--address1`  | Yes      | Address line 1                                  |
-| `--city`      | Yes      | City/town                                       |
-| `--postcode`  | Yes      | UK postcode                                     |
-| `--weight`    | Yes      | Weight in kg                                    |
-| `--service`   | Yes      | Service code (see Service Codes below)          |
-| `--company`   | No       | Company name                                    |
-| `--address2`  | No       | Address line 2                                  |
-| `--email`     | No       | Recipient email                                 |
-| `--phone`     | No       | Recipient phone                                 |
-| `--reference` | No       | Customer reference (e.g., Shopify order number) |
-| `--contents`  | No       | Package contents description                    |
-
-### download-invoices Options
-
-| Option         | Required | Description                                          |
-| -------------- | -------- | ---------------------------------------------------- |
-| `--output-dir` | Yes      | Absolute destination for invoice PDFs                |
-| `--legacy-dir` | No       | Legacy folder to migrate old invoices from           |
-| `--headed`     | No       | Run browser in headed mode for selector/debug checks |
-
-## Usage Examples
-
-```bash
-node scripts/dist/cli.js create-label \
-  --name "Jane Doe" \
-  --address1 "456 Oxford Street" \
-  --city "London" \
-  --postcode "W1D 1BS" \
-  --weight 3 \
-  --service SPECIALDELIVERY1 \
-  --reference "ORD-67890"
-```
+| Command                                                  | Purpose                                                                                     |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| `purchase-label --request-file <private.json> --confirm` | Adopt/import or create one Click & Drop order, buy postage, download and validate its label |
+| `reconcile-purchase --run-id <id>`                       | Recover an already-paid uncertain run; never enters checkout or makes payment               |
+| `list-services`                                          | Return the supported service catalogue in operational order                                 |
+| `download-invoices`                                      | Download new invoice PDFs with dedupe                                                       |
+| `create-label`                                           | Legacy browser preview only; does not submit                                                |
+| `submit`                                                 | Compatibility refusal; does not submit                                                      |
+| `download-label`                                         | Legacy session download                                                                     |
+| `screenshot`                                             | Diagnostic screenshot                                                                       |
+| `reset`                                                  | Clear the legacy browser session                                                            |
 
 ## How It Works
 

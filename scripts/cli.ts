@@ -1,14 +1,28 @@
 #!/usr/bin/env npx tsx
-/**
- * Royal Mail Label Manager CLI
- *
- * Zod-validated CLI for creating Royal Mail shipping labels via Click & Drop.
- */
 
 import { z, createCommand, runCli, cliTypes } from "@local/cli-utils";
 import { RoyalMailClient, CreateLabelOptions } from "./royalmail-client.js";
+import {
+  executeRoyalMailPurchaseCommand,
+  executeRoyalMailReconcileCommand,
+} from "./purchase-command.js";
+import {
+  defaultRoyalMailStateDir,
+  RoyalMailBrowserMutex,
+} from "./purchase-state.js";
 
-// Define commands with Zod schemas
+async function withRoyalMailBrowserLock<T>(
+  operationId: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const release = new RoyalMailBrowserMutex(defaultRoyalMailStateDir()).acquire(operationId);
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
 const commands = {
   "create-label": createCommand(
     z.object({
@@ -63,42 +77,92 @@ const commands = {
         reference: typedArgs.reference,
         contents: typedArgs.contents,
       };
-      return client.createLabel(labelOptions);
+      return withRoyalMailBrowserLock(
+        `legacy-create-label:${process.pid}`,
+        () => client.createLabel(labelOptions),
+      );
     },
-    "Fill label creation form (does NOT submit)"
+    "Fill label creation form (does NOT submit)",
+    { sideEffect: "external_send", requiresConfirmation: true }
+  ),
+
+  "purchase-label": createCommand(
+    z.object({
+      requestFile: z.string().min(1).describe("Mode-0600 JSON purchase request file"),
+      stateDir: z.string().min(1).optional().describe("Private Royal Mail runtime state directory"),
+      headed: z.boolean().optional().describe("Run Click & Drop browser visibly for supervised rollout"),
+    }),
+    async (args) => {
+      const typedArgs = args as {
+        requestFile: string;
+        stateDir?: string;
+        headed?: boolean;
+      };
+      return executeRoyalMailPurchaseCommand(typedArgs);
+    },
+    "Purchase, download, and prepare one Royal Mail label in a single idempotent transaction",
+    {
+      sideEffect: "external_send",
+      requiresConfirmation: true,
+      operationResultExit: true,
+    }
+  ),
+
+  "reconcile-purchase": createCommand(
+    z.object({
+      runId: z.string().min(1).describe("Existing Royal Mail purchase run ID"),
+      stateDir: z.string().min(1).optional().describe("Private Royal Mail runtime state directory"),
+      headed: z.boolean().optional().describe("Run Click & Drop browser visibly for supervised recovery"),
+    }),
+    async (args) => {
+      const typedArgs = args as {
+        runId: string;
+        stateDir?: string;
+        headed?: boolean;
+      };
+      return executeRoyalMailReconcileCommand(typedArgs);
+    },
+    "Recover an already-paid Royal Mail run without entering checkout or making a payment",
+    { sideEffect: "write", operationResultExit: true }
   ),
 
   "submit": createCommand(
     z.object({}),
     async (_args, client: RoyalMailClient) => client.submit(),
-    "Submit the filled form after user confirmation"
+    "Compatibility command that refuses automated submission and requires manual portal completion",
+    { sideEffect: "external_send", requiresConfirmation: true }
   ),
 
   "download-label": createCommand(
     z.object({}),
-    async (_args, client: RoyalMailClient) => client.downloadLabel(),
-    "Download the generated PDF label"
+    async (_args, client: RoyalMailClient) => withRoyalMailBrowserLock(
+      `legacy-download-label:${process.pid}`,
+      () => client.downloadLabel(),
+    ),
+    "Download the generated PDF label",
+    { sideEffect: "read" }
   ),
 
   "download-invoices": createCommand(
     z.object({
       outputDir: z.string().min(1).describe("Absolute output directory for downloaded invoice PDFs"),
-      legacyDir: z.string().optional().describe("Optional legacy directory to migrate existing invoices from"),
       headed: z.boolean().optional().describe("Run browser in headed mode for debugging"),
     }),
     async (args, client: RoyalMailClient) => {
       const typedArgs = args as {
         outputDir: string;
-        legacyDir?: string;
         headed?: boolean;
       };
-      return client.downloadInvoices({
-        outputDir: typedArgs.outputDir,
-        legacyDir: typedArgs.legacyDir,
-        headed: typedArgs.headed,
-      });
+      return withRoyalMailBrowserLock(
+        `download-invoices:${process.pid}`,
+        () => client.downloadInvoices({
+          outputDir: typedArgs.outputDir,
+          headed: typedArgs.headed,
+        }),
+      );
     },
-    "Download new Royal Mail invoices with dedupe and optional legacy migration"
+    "Download new Royal Mail invoices with dedupe into staging; legacy files use exact-digest promotion",
+    { sideEffect: "write", requiresConfirmation: true }
   ),
 
   "list-services": createCommand(
@@ -111,7 +175,8 @@ const commands = {
         message: "Use the 'code' value with --service option in create-label",
       };
     },
-    "Show available Royal Mail services"
+    "Show available Royal Mail services",
+    { sideEffect: "read" }
   ),
 
   "screenshot": createCommand(
@@ -121,20 +186,27 @@ const commands = {
     }),
     async (args, client: RoyalMailClient) => {
       const { filename, fullPage } = args as { filename?: string; fullPage?: boolean };
-      return client.takeScreenshot({ filename, fullPage });
+      return withRoyalMailBrowserLock(
+        `screenshot:${process.pid}`,
+        () => client.takeScreenshot({ filename, fullPage }),
+      );
     },
-    "Take screenshot of current page"
+    "Take screenshot of current page",
+    { sideEffect: "read" }
   ),
 
   "reset": createCommand(
     z.object({}),
-    async (_args, client: RoyalMailClient) => client.reset(),
-    "Close browser and clear session"
+    async (_args, client: RoyalMailClient) => withRoyalMailBrowserLock(
+      `reset:${process.pid}`,
+      () => client.reset(),
+    ),
+    "Close browser and clear session",
+    { sideEffect: "destructive" }
   ),
 };
 
-// Run CLI
 runCli(commands, RoyalMailClient, {
   programName: "royalmail-cli",
-  description: "Royal Mail label creation via Click & Drop",
+  description: "Royal Mail label creation and purchase via Click & Drop",
 });

@@ -1,18 +1,22 @@
 {
   "name": "royalmail-label-manager-scripts",
-  "version": "1.0.0",
+  "version": "1.2.4",
   "type": "module",
   "scripts": {
     "build": "tsc",
-    "dev": "tsx cli.ts"
+    "dev": "tsx cli.ts",
+    "start": "tsx cli.ts",
+    "cli": "tsx cli.ts",
+    "test": "TMPDIR=/tmp node --import tsx --test *.test.ts",
+    "test:ci": "TMPDIR=/tmp node --import tsx --test arbitration-guard.test.ts label-artifact.test.ts purchase-command.test.ts purchase-flow.test.ts purchase-input.test.ts purchase-state.test.ts reconcile-flow.test.ts royalmail-api.test.ts royalmail-cli.test.ts royalmail-client.test.ts royalmail-domain.test.ts royalmail-portal.test.ts"
   },
   "dependencies": {
     "playwright": "^1.40.0",
     "@local/cli-utils": "github:bigl34/claude-code-plugin-shared"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
-    "tsx": "^4.7.0",
-    "typescript": "^5.3.0"
+    "@types/node": "22.19.19",
+    "tsx": "4.22.3",
+    "typescript": "5.9.3"
   }
 }

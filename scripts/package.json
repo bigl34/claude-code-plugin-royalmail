@@ -11,7 +11,7 @@
     "test:ci": "TMPDIR=/tmp node --import tsx --test arbitration-guard.test.ts label-artifact.test.ts purchase-command.test.ts purchase-flow.test.ts purchase-input.test.ts purchase-state.test.ts reconcile-flow.test.ts royalmail-api.test.ts royalmail-cli.test.ts royalmail-client.test.ts royalmail-domain.test.ts royalmail-portal.test.ts"
   },
   "dependencies": {
-    "playwright": "^1.40.0",
+    "playwright": "^1.63.0",
     "@local/cli-utils": "github:bigl34/claude-code-plugin-shared"
   },
   "devDependencies": {

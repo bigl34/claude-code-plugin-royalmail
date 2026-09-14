@@ -1,7 +1,6 @@
 ---
 name: royalmail-label-manager
 description: Use this agent for Royal Mail Click & Drop label purchases, recovery, downloads, service lookup, and invoice operations.
-model: claude-opus-4-6
 color: error
 mode: subagent
 ---

@@ -24,7 +24,6 @@ export interface RoyalMailService {
   portalName: string;
   vatTreatment: RoyalMailVatTreatment;
   trackingKind: RoyalMailTrackingKind;
-  requestSignature: boolean;
 }
 
 export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
@@ -34,7 +33,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Royal Mail Tracked 24",
     vatTreatment: "standard20",
     trackingKind: "full",
-    requestSignature: false,
   },
   {
     key: "second_class",
@@ -42,7 +40,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Royal Mail 2nd Class",
     vatTreatment: "exempt",
     trackingKind: "none",
-    requestSignature: false,
   },
   {
     key: "tracked48",
@@ -50,7 +47,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Royal Mail Tracked 48",
     vatTreatment: "standard20",
     trackingKind: "full",
-    requestSignature: false,
   },
   {
     key: "first_class",
@@ -58,7 +54,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Royal Mail 1st Class",
     vatTreatment: "exempt",
     trackingKind: "none",
-    requestSignature: false,
   },
   {
     key: "signed_second",
@@ -66,7 +61,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Royal Mail Signed For 2nd Class",
     vatTreatment: "exempt",
     trackingKind: "delivery_confirmation",
-    requestSignature: true,
   },
   {
     key: "tracked24_signature",
@@ -74,7 +68,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Royal Mail Tracked 24",
     vatTreatment: "standard20",
     trackingKind: "full",
-    requestSignature: true,
   },
   {
     key: "special_delivery_1pm",
@@ -82,7 +75,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Special Delivery Guaranteed by 1pm",
     vatTreatment: "exempt",
     trackingKind: "full",
-    requestSignature: true,
   },
   {
     key: "signed_first",
@@ -90,7 +82,6 @@ export const ROYAL_MAIL_SERVICES: readonly RoyalMailService[] = [
     portalName: "Royal Mail Signed For 1st Class",
     vatTreatment: "exempt",
     trackingKind: "delivery_confirmation",
-    requestSignature: true,
   },
 ] as const;
 

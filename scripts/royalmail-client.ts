@@ -8,8 +8,6 @@ import {
   mkdirSync,
   renameSync,
   readdirSync,
-  statSync,
-  copyFileSync,
   rmSync,
   openSync,
   closeSync,
@@ -18,6 +16,7 @@ import {
   lstatSync,
 } from "fs";
 import { createHash, randomUUID } from "crypto";
+import { execFileSync } from "node:child_process";
 import { join, resolve, isAbsolute, sep, basename, dirname, extname } from "path";
 import { loadPassCredentials, loadServiceConfig, z } from "@local/cli-utils";
 import { secureStatePath, secureWrite } from "./vendor/secure-state/index.js";
@@ -164,12 +163,6 @@ interface ServiceInfo {
   description: string;
 }
 
-interface MigrationResult {
-  moved: number;
-  skippedExisting: number;
-  errors: string[];
-}
-
 export interface DownloadInvoicesResult {
   schemaVersion: "1.0";
   provider: "royal-mail";
@@ -183,7 +176,7 @@ export interface DownloadInvoicesResult {
   skipped: string[];
   errors: string[];
   warnings: string[];
-  migration: MigrationResult;
+  migration: null;
 }
 
 interface InvoiceRowInfo {
@@ -576,6 +569,11 @@ export class RoyalMailClient {
       }
     }
 
+    if (normalizedRoot === resolve(INVOICE_ROOT_DIR)) {
+      const guard = join(process.env.HOME!, "biz", "scripts", "sync", "require-mydrive.mjs");
+      execFileSync(process.execPath, [guard, "--check"], { stdio: ["ignore", "ignore", "pipe"] });
+    }
+
     let existingAncestor = normalizedRoot;
     const missingRootParts: string[] = [];
     while (!existsSync(existingAncestor)) {
@@ -620,46 +618,6 @@ export class RoyalMailClient {
       }
     }
     return current;
-  }
-
-  private validateLegacyDirPath(legacyDir: string): string {
-    if (!isAbsolute(legacyDir)) {
-      throw new Error("--legacy-dir must be an absolute path.");
-    }
-    return resolve(legacyDir);
-  }
-
-  private resolveRealPathAllowMissing(targetPath: string): string {
-    let existingAncestor = resolve(targetPath);
-    const missingSegments: string[] = [];
-
-    while (!existsSync(existingAncestor)) {
-      const parent = dirname(existingAncestor);
-      if (parent === existingAncestor) {
-        return resolve(targetPath);
-      }
-      missingSegments.unshift(basename(existingAncestor));
-      existingAncestor = parent;
-    }
-
-    return resolve(realpathSync(existingAncestor), ...missingSegments);
-  }
-
-  private validateInvoiceDirectorySeparation(legacyDir: string, outputDir: string): void {
-    const realLegacyDir = this.resolveRealPathAllowMissing(legacyDir);
-    const realOutputDir = this.resolveRealPathAllowMissing(outputDir);
-    const legacyContainsOutput = realOutputDir.startsWith(`${realLegacyDir}${sep}`);
-    const outputContainsLegacy = realLegacyDir.startsWith(`${realOutputDir}${sep}`);
-
-    if (realLegacyDir === realOutputDir || legacyContainsOutput || outputContainsLegacy) {
-      throw new Error(
-        "--legacy-dir and --output-dir must be distinct, non-overlapping real directories."
-      );
-    }
-  }
-
-  private sha256File(filePath: string): string {
-    return createHash("sha256").update(readFileSync(filePath)).digest("hex");
   }
 
   private isProcessAlive(pid: number): boolean {
@@ -908,138 +866,6 @@ export class RoyalMailClient {
       this.downloadLockFd = null;
       this.downloadLockToken = null;
     }
-  }
-
-  private migrateLegacyInvoices(legacyDir: string | undefined, outputDir: string): MigrationResult {
-    const migration: MigrationResult = {
-      moved: 0,
-      skippedExisting: 0,
-      errors: [],
-    };
-
-    if (!legacyDir || !existsSync(legacyDir)) {
-      return migration;
-    }
-
-    let entries: string[] = [];
-    let quarantineDir: string | null = null;
-    const quarantineSource = (sourcePath: string, entry: string): void => {
-      if (!quarantineDir) {
-        const quarantineRoot = join(legacyDir, ".migrated-quarantine"); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-        if (existsSync(quarantineRoot)) {
-          const rootStat = lstatSync(quarantineRoot);
-          if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-            throw new Error("legacy quarantine root is not a real directory");
-          }
-        } else {
-          mkdirSync(quarantineRoot, { mode: 0o700 });
-        }
-        const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-        const quarantineStem = `${timestamp}-${process.pid}`;
-        quarantineDir = join(quarantineRoot, quarantineStem); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-        let suffix = 0;
-        while (existsSync(quarantineDir)) {
-          suffix += 1;
-          quarantineDir = join(quarantineRoot, `${quarantineStem}-${suffix}`); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-        }
-        mkdirSync(quarantineDir, { mode: 0o700 });
-      }
-      renameSync(sourcePath, join(quarantineDir, entry)); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
-    };
-    try {
-      entries = readdirSync(legacyDir);
-    } catch (error: any) {
-      migration.errors.push(`Could not read legacy dir ${legacyDir}: ${error.message}`);
-      return migration;
-    }
-
-    for (const entry of entries) {
-      if (!entry.toLowerCase().endsWith(".pdf")) {
-        continue;
-      }
-
-      const sourcePath = join(legacyDir, entry);
-      const destinationPath = join(outputDir, entry);
-      const tempPath = `${destinationPath}.migrating-${process.pid}-${Date.now()}`;
-
-      try {
-        const sourceStat = lstatSync(sourcePath);
-        if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) {
-          continue;
-        }
-        if (sourceStat.size <= 0) {
-          throw new Error("legacy source is empty");
-        }
-
-        const sourceHash = this.sha256File(sourcePath);
-
-        if (existsSync(destinationPath)) {
-          const destinationStat = lstatSync(destinationPath);
-          if (destinationStat.isSymbolicLink()) {
-            throw new Error("destination is a symbolic link");
-          }
-          if (destinationStat.isFile() && destinationStat.size > 0) {
-            if (this.sha256File(destinationPath) !== sourceHash) {
-              throw new Error("destination exists with different SHA-256 content");
-            }
-
-            migration.skippedExisting += 1;
-            quarantineSource(sourcePath, entry);
-            continue;
-          }
-        }
-
-        copyFileSync(sourcePath, tempPath);
-
-        const tempStat = statSync(tempPath);
-        if (!tempStat.isFile() || tempStat.size <= 0 || this.sha256File(tempPath) !== sourceHash) {
-          throw new Error("migrated file SHA-256 mismatch");
-        }
-
-        if (existsSync(destinationPath)) {
-          const destinationStat = lstatSync(destinationPath);
-          if (destinationStat.isSymbolicLink()) {
-            throw new Error("destination became a symbolic link during migration");
-          }
-          if (destinationStat.isFile() && destinationStat.size > 0) {
-            if (this.sha256File(destinationPath) !== sourceHash) {
-              throw new Error("destination changed during migration");
-            }
-
-            rmSync(tempPath, { force: true });
-            migration.skippedExisting += 1;
-            quarantineSource(sourcePath, entry);
-            continue;
-          }
-
-          rmSync(destinationPath, { force: true });
-        }
-
-        renameSync(tempPath, destinationPath);
-
-        const destinationStat = lstatSync(destinationPath);
-        if (
-          !destinationStat.isFile() ||
-          destinationStat.size <= 0 ||
-          this.sha256File(destinationPath) !== sourceHash
-        ) {
-          throw new Error("saved destination SHA-256 mismatch");
-        }
-
-        quarantineSource(sourcePath, entry);
-        migration.moved += 1;
-      } catch (error: any) {
-        migration.errors.push(`Migration failed for ${entry}: ${error.message}`);
-        try {
-          if (existsSync(tempPath)) {
-            rmSync(tempPath, { force: true });
-          }
-        } catch {
-        }
-      }
-    }
-
-    return migration;
   }
 
   private sanitizePdfFilename(filename: string): string {
@@ -1704,12 +1530,6 @@ export class RoyalMailClient {
   }
 
   async downloadInvoices(options: DownloadInvoicesOptions): Promise<DownloadInvoicesResult> {
-    const legacyDir = (options as DownloadInvoicesOptions & { legacyDir?: string }).legacyDir;
-    if (legacyDir) {
-      throw new Error(
-        "Royal Mail --legacy-dir migration is retired; bind legacy files through invoice-providers prepare-promotion and exact promote-staging instead."
-      );
-    }
     this.setHeaded(options.headed === true);
 
     const outputDir = this.validateOutputDirPath(options.outputDir, INVOICE_ROOT_DIR, "Royal Mail");
@@ -1721,17 +1541,12 @@ export class RoyalMailClient {
     const skipped: string[] = [];
     const errors: string[] = [];
     const warnings: string[] = [];
-    const migration: MigrationResult = { moved: 0, skippedExisting: 0, errors: [] };
 
     try {
       const knownRowKeys = this.loadInvoiceState(outputDir);
       const existingFiles = this.collectExistingInvoiceFiles(outputDir);
       const preRunFiles = new Set(existingFiles);
       const claimedExistingFiles = new Set<string>();
-
-      if (migration.errors.length > 0) {
-        warnings.push(...migration.errors.map((e) => `Migration warning: ${e}`));
-      }
 
       const page = await this.ensureBrowser();
       await this.login();
@@ -1832,7 +1647,7 @@ export class RoyalMailClient {
       this.saveInvoiceState(outputDir, knownRowKeys);
 
       const finishedAt = new Date().toISOString();
-      const partialFailure = errors.length > 0 || migration.errors.length > 0;
+      const partialFailure = errors.length > 0;
 
       return {
         schemaVersion: "1.0",
@@ -1847,7 +1662,7 @@ export class RoyalMailClient {
         skipped,
         errors,
         warnings,
-        migration,
+        migration: null,
       };
     } finally {
       this.releaseDownloadLock();

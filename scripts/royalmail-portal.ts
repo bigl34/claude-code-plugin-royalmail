@@ -135,6 +135,8 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
   private readonly headed: boolean;
   private readonly resolveCardCvv: () => string;
   private readonly resolveClickToPayOtp?: () => string | Promise<string>;
+  private readonly cookiePromptWaitMs: number;
+  private readonly recoveryActionWaitMs: number;
   private context: BrowserContext | null = null;
   private page: Page | null = null;
 
@@ -143,9 +145,13 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
     headed?: boolean;
     resolveCardCvv?: () => string;
     resolveClickToPayOtp?: () => string | Promise<string>;
+    cookiePromptWaitMs?: number;
+    recoveryActionWaitMs?: number;
   }) {
     this.stateDir = options.stateDir;
     this.headed = options.headed ?? false;
+    this.cookiePromptWaitMs = options.cookiePromptWaitMs ?? 4_000;
+    this.recoveryActionWaitMs = options.recoveryActionWaitMs ?? 5_000;
     this.resolveCardCvv = options.resolveCardCvv ?? (() => {
       const credentials = loadPassCredentials({
         prefix: "your-secret-store/royalmail",
@@ -208,9 +214,9 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
     await Promise.race([
       ...candidates.map((candidate) => candidate.first().waitFor({
         state: "visible",
-        timeout: 4_000,
+        timeout: this.cookiePromptWaitMs,
       })),
-      page.waitForTimeout(4_000),
+      page.waitForTimeout(this.cookiePromptWaitMs),
     ]).catch(() => undefined);
     const button = await firstVisible(candidates);
     await button?.click({ timeout: 3_000 }).catch(() => undefined);
@@ -467,30 +473,7 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
       return grossMinor;
     }
 
-    const exact = new RegExp(`^${serviceDisplayName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
-    const option = await firstVisible([
-      page.getByRole("radio", { name: exact }),
-      page.getByRole("button", { name: exact }),
-      page.getByText(serviceDisplayName, { exact: true }),
-    ]);
-    if (!option) {
-      throw new Error(`Click & Drop service ${serviceDisplayName} is unavailable for this package`);
-    }
-    await option.click();
-
-    if (serviceKey === "tracked24_signature") {
-      const signature = await firstVisible([
-        page.getByRole("checkbox", { name: /signature/i }),
-        page.locator('input[type="checkbox"][name*="signature" i]'),
-      ]);
-      if (!signature) {
-        throw new Error("Click & Drop signature option is unavailable for Tracked 24");
-      }
-      if (!(await signature.isChecked())) {
-        await signature.check();
-      }
-    }
-    return 0;
+    throw new Error(`Click & Drop service ${serviceDisplayName} is unavailable for this package`);
   }
 
   private async openApplyPostageEditor(page: Page): Promise<void> {
@@ -829,7 +812,6 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
     providerOrderReference: string;
     serviceKey: RoyalMailServiceKey;
     serviceDisplayName: string;
-    requestSignature: boolean;
     package: {
       format: string;
       weightGrams: number;
@@ -837,8 +819,6 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
       widthMm: number;
       heightMm: number;
     };
-    outputDir: string;
-    headed: boolean;
   }): Promise<{ expectedGrossMinor: number }> {
     const page = await this.login();
     const row = await this.locateUniqueOrderRow(
@@ -1090,7 +1070,7 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
     await Promise.race(
       recoveryDownloadCandidates.map((candidate) => candidate.first().waitFor({
         state: "visible",
-        timeout: 5_000,
+        timeout: this.recoveryActionWaitMs,
       })),
     ).catch(() => undefined);
     const downloadButton = await firstVisible(recoveryDownloadCandidates);
@@ -1108,9 +1088,9 @@ export class RoyalMailClickDropPortal implements RoyalMailPurchasePortal {
 
     return {
       confirmedGrossMinor: input.expectedGrossMinor,
-      paymentReference: parsePaymentReference(bodyText),
+      paymentReference: parsePaymentReference(bindingText),
       paidAt: new Date().toISOString(),
-      trackingNumber: bodyText.match(/\b([A-Z]{2}\d{9}GB)\b/i)?.[1]?.toUpperCase(),
+      trackingNumber: bindingText.match(/\b([A-Z]{2}\d{9}GB)\b/i)?.[1]?.toUpperCase(),
       pdfPath,
     };
   }

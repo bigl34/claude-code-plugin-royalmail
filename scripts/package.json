@@ -8,7 +8,7 @@
     "start": "tsx cli.ts",
     "cli": "tsx cli.ts",
     "test": "TMPDIR=/tmp node --import tsx --test *.test.ts",
-    "test:ci": "TMPDIR=/tmp node --import tsx --test arbitration-guard.test.ts label-artifact.test.ts purchase-command.test.ts purchase-flow.test.ts purchase-input.test.ts purchase-state.test.ts reconcile-flow.test.ts royalmail-api.test.ts royalmail-cli.test.ts royalmail-client.test.ts royalmail-domain.test.ts royalmail-portal.test.ts"
+    "test:ci": "TMPDIR=/tmp node --import tsx --test arbitration-guard.test.ts label-artifact.test.ts purchase-command.test.ts purchase-flow.test.ts purchase-input.test.ts purchase-state.test.ts reconcile-flow.test.ts royalmail-api.test.ts royalmail-cli.test.ts royalmail-client.test.ts royalmail-domain.test.ts royalmail-portal.test.ts royalmail-portal-click-to-pay.test.ts royalmail-portal-recovery.test.ts"
   },
   "dependencies": {
     "playwright": "^1.63.0",

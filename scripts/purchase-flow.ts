@@ -120,10 +120,7 @@ export interface RoyalMailPurchasePortal {
     providerOrderReference: string;
     serviceKey: RoyalMailServiceKey;
     serviceDisplayName: string;
-    requestSignature: boolean;
     package: RoyalMailPurchaseInput["package"];
-    outputDir: string;
-    headed: boolean;
   }): Promise<{ expectedGrossMinor: number }>;
   completePaymentAndDownload(input: {
     providerOrderId: number;
@@ -416,10 +413,7 @@ export async function purchaseRoyalMailLabel(
       providerOrderReference: order.orderReference ?? "",
       serviceKey: service.key,
       serviceDisplayName: service.portalName,
-      requestSignature: service.requestSignature,
       package: input.package,
-      outputDir: artifactDir,
-      headed: input.headed ?? false,
     });
     if (!Number.isSafeInteger(checkout.expectedGrossMinor) || checkout.expectedGrossMinor <= 0) {
       throw new Error("Click & Drop did not expose a valid GBP checkout total");
